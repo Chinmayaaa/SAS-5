@@ -229,10 +229,10 @@ MACRO NAME: CreateDataDictionary
 
 	* Create a new dataset with the name "Variables" so that the spreadsheet tab will have this name;
 	* Modified to sort by domain and variable - Andrew Borst 01/10/2016;
-	proc sort data=datadictionary out=variables;
+	/*proc sort data=datadictionary out=variables;
 		key domain;
 		key variable;
-	run;
+	run;*/
 	
 	* Get the extension of the file that will be created;
 	data _null_;
