@@ -15,10 +15,11 @@
 *			8. TrimTextVariables - Trims the text variables in a single, specified dataset
 *			9. CopyOnCoreFilesByExtension - Copies the .sas or .txt files extracted from OnCore to a specified 
 *					location (NO PROMPT)
-*			10. CopyOnCoreSASFiles- Copies just the .sas files extracted from OnCore to a specified 
+*			10. CopyOnCoreSASFiles - Copies just the .sas files extracted from OnCore to a specified 
 *					location (NO PROMPT)
-*			11. CopyOnCoreTextFiles- Copies just the .txt files extracted from OnCore to a specified 
+*			11. CopyOnCoreTextFiles - Copies just the .txt files extracted from OnCore to a specified 
 *					location (NO PROMPT)
+.			12. RemoveLabelColons - Removes ending ':' from all labels in a dataset
 *		
 *		NOTE: When passing parameters, make sure there is a "\" at the end of the directory path.
 * 		7/22/2014 MGE:  This is an update to OnCoreMacros.sas and should be used when processing the data exports 
@@ -453,7 +454,8 @@ MACRO #2:	CreateOnCoreFormatFile
 	run;
 
 	%put &deletestring.; * For debugging purposes;
-	*delete all temp datasets created above;
+
+	* Delete all temp datasets created above;
 	proc datasets memtype=data lib=work nolist;
 		delete &deletestring. ;
 	quit; run;
@@ -495,12 +497,12 @@ MACRO #3: CopySASorTextFiles
 
 	/*(1)*/
 	%sas_only:		
-		%CopyOnCoreSASFiles(&SourceFolder.,&DestinationFolder.);
+		%CopyOnCoreFilesByExtension(&SourceFolder., &DestinationFolder., 'sas');
 	%goto finish;
 
 	/*(2)*/
 	%txt_only:		
-		%CopyOnCoreTextFiles(&SourceFolder.,&DestinationFolder.);
+		%CopyOnCoreFilesByExtension(&SourceFolder., &DestinationFolder., 'txt');
 	%goto finish;
 
 	%finish:  
@@ -540,7 +542,7 @@ MACRO #4: RunBatchSASFiles
 		* Read in the Followup.SAS file, storing each line in the SAS file as an observation for the var "formatline";
 		data corrected_fu;
 			length FORMATLINE $1000.;
-			infile "&RawSASFileDirectory.Followup.SAS";
+			infile "&RawSASFileDirectory.Followup.sas";
 			input;
 			FORMATLINE = _infile_;
 		run;
@@ -558,7 +560,7 @@ MACRO #4: RunBatchSASFiles
 		* Overwrite the incorrect Followup.SAS program with the corrected text from the corrected_fu dataset;
 		data _null_;
 		    set corrected_fu; 
-		    file "&RawSASFileDirectory.Followup.SAS" ; 
+		    file "&RawSASFileDirectory.Followup.sas" ; 
 		    put FORMATLINE; 
 		run;
 
@@ -575,7 +577,7 @@ MACRO #4: RunBatchSASFiles
 		* Read in the Demographics.SAS file, storing each line in the SAS file as an observation for the var "formatline";
 		data corrected_demog;
 			length FORMATLINE $1000.;
-			infile "&RawSASFileDirectory.Demographics.SAS";
+			infile "&RawSASFileDirectory.Demographics.sas";
 			input;
 			FORMATLINE = _infile_;
 		run; 
@@ -595,7 +597,7 @@ MACRO #4: RunBatchSASFiles
 		* Overwrite the incorrect Demographics.SAS program with the corrected text from the corrected_demog dataset;
 		data _null_;
 		    set corrected_demog; 
-		    file "&RawSASFileDirectory.Demographics.SAS" ; 
+		    file "&RawSASFileDirectory.Demographics.sas" ; 
 		    put FORMATLINE; 
 		run;
 
@@ -612,7 +614,7 @@ MACRO #4: RunBatchSASFiles
 	%GetFilenamesFromDir(&OnCoreSASFileDir,sasfiledir);
 
 	data sasfiledir2; 
-		set sasfiledir(where=(find(upcase(FILENAME),'.SAS')));
+		set sasfiledir(where=(find(lowcase(FILENAME),'.sas')));
 
 		* Add variable containing file path of '.sas' file names;
 		FILESAS=(trim(DIRECTORY) || trim(FILENAME) );
@@ -665,11 +667,17 @@ MACRO #5: InsertID
 			set &DatasetToAlter.;
 
 			* Create USUBJID and SUBJID variables and set the length;
-			format USUBJID $8. SUBJID 3.;
-
+			format SUBJID 3. USUBJID $8.;
+				
 			if find(SEQUENCE_NO_,'-')>0 then do; *SEQUENCE_NO_ contains a hyphen in it;
 				SUBJID = substr(SEQUENCE_NO_,indexc(SEQUENCE_NO_,'-')+1,length(SEQUENCE_NO_)-indexc(SEQUENCE_NO_,'-'));
 				USUBJID = &StudyNum. || substr(SEQUENCE_NO_,indexc(SEQUENCE_NO_,'-'),length(SEQUENCE_NO_)-indexc(SEQUENCE_NO_,'-')+1);
+				if &StudyNum. = '0498' then do;
+					*0498 has 4-digit IDs in SEQUENCE_NO_;				
+					if SUBJID < 10 then USUBJID = &StudyNum. || '-00' || strip(put(SUBJID, 3.));
+					else if SUBJID < 100 then USUBJID = &StudyNum. || '-0' || strip(put(SUBJID, 3.));
+					else USUBJID = &StudyNum. || '-' || strip(put(SUBJID, 3.));
+				end;
 			end;
 			else do; *SEQUENCE_NO_ does not contain a hyphen in it;
 				SUBJID = SEQUENCE_NO_;
@@ -680,8 +688,8 @@ MACRO #5: InsertID
 			drop SEQUENCE_NO_ INITIALS; 
 			if &HasFormDescVar. = 1 then do; drop FORM_DESC_; end;
 
-			label SUBJID = 'Subject ID'
-				  USUBJID = 'Unique Subject ID';
+			label SUBJID = 'Subject ID Numeric'
+				  USUBJID = 'Subject ID Character';
 		run;
 
 	%mend InsertIDPerDataset; 
@@ -818,7 +826,7 @@ MACRO #7: InsertStudyID
 			set &DatasetToAlter.;
 
 			STUDYID = 'IUCRO-' || &StudyNum.;
-			label STUDYID = 'Study ID';
+			label STUDYID = 'Study Protocol Number';
 		run;
 	%mend; 
 
@@ -1004,29 +1012,41 @@ MACRO #9: CopyOnCoreFilesByExtension
 
 		Author:  Anna Kispert
 		Date created:  June 2015
+		Updates:  10/27/15 - Edited to extract nested folders
 **********************************************/
 %macro CopyOnCoreFilesByExtension(SourceFolder, DestinationFolder, Extension);
 
-	%GetFilenamesFromDir(&SourceFolder.,source_folder_contents);
+	%GetFilenamesFromDir(&SourceFolder.,source_folder_contents,,,yes);
 
-	data export_files; 
+	data source_folder_contents2;
 		set source_folder_contents;
-		*Only create FILEPATH variables for folders (no extension);
-		if find(filename,'.') then delete;
-		* Add variable containing file path of '.txt' or '.sas' file names;
-		FILEPATH=(trim(directory) || trim(filename) || '\' || trim(filename) || '.' || &Extension.  );
+		if find(FILENAME,'.') = 0; *Gets folder names only;
+
+		* Gets the position of the last backslash;
+		LASTSLASHPOS = findc(FILENAME,'\',-length(FILENAME));
+		* Determine the file path of the file to move;
+		format FILEPATH $500.;
+		if LASTSLASHPOS = 0 then 
+			FILEPATH = strip(DIRECTORY) || strip(FILENAME) || '\' || strip(FILENAME) || '.' || &Extension.;
+		else
+			FILEPATH = strip(DIRECTORY) || strip(FILENAME) || '\' || 
+					   strip(substr(FILENAME,LASTSLASHPOS+1,length(FILENAME)-LASTSLASHPOS)) || '.' || &Extension.;
+
+		* This will equal 0 if the file does not exist, 1 if it does;
+		CHECKEXIST = fileexist(strip(FILEPATH));
+
 		* Create the code that will move the file;
-		MOVECODE = catt('%sysExec xcopy "',strip(FILEPATH),'" "&DestinationFolder" /E /Y;');
+		MOVECODE = catt('%sysExec xcopy "',strip(FILEPATH),'" "&DestinationFolder." /E /Y;');
 	run;
 
 	data _null_;
-		set export_files;
-		call execute(MOVECODE);
+		set source_folder_contents2;
+		if CHECKEXIST = 1 then call execute(MOVECODE);
 	run;
 
 	* Delete all temp datasets created above;
 	proc datasets memtype=data lib=work nolist;
-		delete source_folder_contents export_files;
+		delete source_folder_contents source_folder_contents2;
 	quit;
 	run;
 
@@ -1076,3 +1096,58 @@ MACRO #11: CopyOnCoreTextFiles
 	%CopyOnCoreFilesByExtension(&SourceFolder., &DestinationFolder., 'txt');
 %mend;
 ***************END OF MACRO #11;
+
+
+
+
+/********************************************
+MACRO #12: RemoveLabelColons
+		Description:  
+				Removes all ending colons (:) from the end of the labels on a dataset
+		Parameters: 
+				DatasetName = the dataset whose labels to modify
+ 		Example:
+				%RemoveLabelColons(EXIV);
+
+		Author:  Anna Kispert
+		Date created:  September 2015
+**********************************************/
+%macro RemoveLabelColons (DatasetName);
+
+	* Get the list of all variables and their labels in the dataset;
+	proc contents data = &DatasetName. noprint
+		out = DataSetVariables (keep = NAME LABEL);
+	run;
+
+	* If a label ends in a :, create a new label without it, then create an equality statement
+	  to reset the label below;
+	data DataSetVariables2;
+		set DataSetVariables;
+
+		if LABEL ne '' then do;
+			if substr(LABEL,length(LABEL),1) = ':' then do;
+				NEWLABEL = substr(LABEL,1,length(LABEL)-1);
+				EQUALITYSTMT = strip(NAME) || ' = "' || strip(NEWLABEL) || '"';
+			end;
+		end;
+	run;
+
+	* Gather all equality statements into a macro text variable;
+	proc sql number noprint;
+		select trim(EQUALITYSTMT) into :RelabelingStmts separated by ' '
+		from DataSetVariables2;
+	quit;
+
+	* Apply the renaming statements;
+	data &DatasetName.;
+		set &DatasetName.;
+		label &RelabelingStmts.;
+	run;
+
+	* Delete all temp datasets created above;
+	proc datasets memtype=data lib=work nolist;
+		delete DataSetVariables DataSetVariables2;
+	quit; run;
+
+%mend;
+***************END OF MACRO #12;
