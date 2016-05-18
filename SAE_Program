@@ -1,0 +1,47 @@
+/*Normalize input SAE data and put them in two tables DAE and DCE*/ /*…*/ /*include a variable ‘Source’ to indicate whether the data is from DAE or DCE*/
+/*Mix the two datasets*/ PROC SQL; create table raw_combined as select *, count(*) as mgroup from (select * from dae union select * from dce) group by upcase(SID), 'Onset Date'n, 'End Date'n, upcase(Event) order by upcase(SID), 'Onset Date'n, 'End Date'n, upcase(Event), Outcome, Causality, LLT, PT, SOC, Source; QUIT;
+/*Calculate LEVENSHTEIN on concatnated fields*/ DATA icy_combined (drop=gfirst); set raw_combined; by SID; format dspedis 8. gfirst $255.; retain gfirst;
+if first.SID then gfirst = cats('Onset Date'n, 'End Date'n, Event); dspedis = complev(cats('Onset Date'n, 'End Date'n, Event), gfirst, 'il'); RUN;
+/*Order by LEVENSHTEIN edit distance values*/ PROC SQL; create table pre_combined as select * from icy_combined order by upcase(SID), dspedis, 'Onset Date'n, 'End Date'n, upcase(Event), Source desc, Outcome, Causality, LLT, PT, SOC; QUIT;
+/*Macros for field data swaps*/ %let ClearVariables = %str( Source = '?'; SID = '?';
+
+'Onset Date'n = '?'; 'End Date'n = '?'; Event = '?'; Outcome = '?'; Causality = '?'; LLT = '?'; PT = '?'; SOC = '?'; ); %let SaveVariables = %str( _cn = Source; _si = SID; _so = 'Onset Date'n; _ss = 'End Date'n; _et = Event; _oc = Outcome; _rc = Causality; _llt = LLT; _pt = PT; _soc = SOC; ); %let RestoreVariables = %str( Source = _cn; SID = _si; 'Onset Date'n = _so; 'End Date'n = _ss; Event = _et; Outcome = _oc; Causality = _rc; LLT = _llt; PT = _pt; SOC = _soc; );
+/*Navigate and split the list with paired records */ DATA dae1 (drop=i cid pid gid _cn--_soc) dce1 (drop=i cid pid gid _cn--_soc); set pre_combined end=me; format cid pid $255.; retain i 1 cid pid gid;
+if mod(i, 2) = 1 then do; if Source = 'DCE' then output dce1; else output dae1;
+if me then do; _cn = Source; &ClearVariables;
+if _cn = 'DCE' then output dae1; else output dce1; end; else do; cid = Source; pid = SID; gid = mgroup; i + 1; end; end;
+/*even row*/ else if pid ne SID or (cid ne '' and Source ne '') or (cid = '' and Source = '') then do; &SaveVariables; &ClearVariables;
+if cid = 'DCE' then
+
+output dae1; else output dce1; &RestoreVariables;
+/* starting with new odd line */ if Source = 'DCE' then output dce1; else output dae1;
+if me then do; &ClearVariables;
+if _cn = 'DCE' then output dae1; else output dce1; end; else do; cid = Source; pid = SID; gid = mgroup; end; end; else do; /* same id (more than 2) but different dates/et */ if gid ne mgroup then do; &SaveVariables; &ClearVariables;
+if cid = 'DCE' then output dae1; else output dce1; &RestoreVariables;
+/* starting with new odd line */ if Source = 'DCE' then output dce1; else output dae1;
+if me then do; &ClearVariables;
+if _cn = 'DCE' then output dae1; else output dce1; end; else do; cid = Source; pid = SID; gid = mgroup; end; end; else do; if Source = 'DCE' then output dce1; else output dae1; cid = Source; pid = SID; gid = mgroup; i + 1; end; end; RUN;
+/* getting ready for comparison by adding different prefix to variables*/
+
+%MACRO vars(dsn, out, prefix); %let list=; %let type=; %let dsid=%sysfunc(open(&dsn)); %let cnt=%sysfunc(attrn(&dsid,nvars));
+%do i = 1 %to &cnt; %let list=&list:%sysfunc(varname(&dsid,&i)); %let type=&type %sysfunc(vartype(&dsid,&i)); %end;
+%let rc=%sysfunc(close(&dsid));
+/*Formatting code causes damages here!*/ data &out(drop= %do; i = 1 %to &cnt; %let temp=%scan(&list,&i,:); "&temp"n %end; ); set &dsn;
+%do i = 1 %to &cnt; %let temp=%scan(&list,&i,:); "&prefix&temp"n="&temp"n; %end; run;
+%MEND vars;
+%vars(dae1, dae2, dae_); %vars(dce1, dce2, dce_);
+DATA frame; format Source SID Event 'Onset Date'n 'End Date'n Outcome Causality LLT PT SOC $255.; set dae1; _OBS_ = put(_n_, 8.); RUN;
+DATA dae2; set dae2; dae__OBS_ = put(_n_, 8.); RUN;
+DATA dce2; set dce2; DCE__OBS_ = put(_n_, 8.); RUN;
+/*Compare field by field*/ DATA diff (drop= dae_Source -- dae__OBS_ DCE_Source -- DCE__OBS_ _OBS_ i x y flag) mtag (keep=flag); set frame; if _n_= 1 then do; set dae2; set dce2; declare hash hdae(dataset: 'dae2'); hdae.definekey('dae__OBS_'); hdae.definedata(all: 'yes'); hdae.definedone(); declare hash hDCE(dataset: 'dce2'); hDCE.definekey('dce__OBS_'); hDCE.definedata(all: 'yes'); hDCE.definedone(); end;
+hdae.find(key:_OBS_); hDCE.find(key:_OBS_); array ma{*} Source -- SOC;
+
+flag = '';
+do i = 1 to dim(ma); x = strip(vvaluex("dae_" || vname(ma[i])));
+if x = '' or x = '.' or x = 'A0'x then x = ifc(i = 1, 'NA', 'MISSING'); y = strip(vvaluex("dce_" || vname(ma[i])));
+if y = '' or y = '.' or y = 'A0'x then y = ifc(i = 1, 'NA', 'MISSING');
+if i in (1, 2) then ma[i] = x || '0A'x || y; else if lowcase(x) = lowcase(y) or (i = 6 and /*These values meant the same thing*/ lowcase(x) in ('resolved without sequelae', 'recovered/resolved', 'recovered / resolved') and lowcase(y) in ('resolved without sequelae', 'recovered/resolved', 'recovered / resolved')) /*More synomiums can be added here ...*/ then ma[i] = ''; else do; ma[i] = x || '0A'x || y; flag = '*'; end; end;
+if flag ne '' then output diff; output mtag; RUN;
+/*Create the combined line listing for the final discrepancy reference*/ DATA combined; set mtag; set dae1; output; set dce1; output; RUN;
+/* Find and drop columns that don't have discrepancies */ /*…*/
+/* Output to Excel */
