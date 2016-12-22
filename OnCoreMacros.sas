@@ -19,7 +19,10 @@
 *					location (NO PROMPT)
 *			11. CopyOnCoreTextFiles - Copies just the .txt files extracted from OnCore to a specified 
 *					location (NO PROMPT)
-.			12. RemoveLabelColons - Removes ending ':' from all labels in a dataset
+*			12. RemoveLabelColons - Removes ending ':' from all labels in a dataset
+*			13. ArchiveSASDatasets - Moves all SAS datasets in one folder to another folder, grouped into a subfolder with
+*				the name YYYY-MM-DD, which represents the "creation date" of the datasets
+*			14. FixTimeImport - Temporary macro to fix the OnCore bug that imports integers as blank time values
 *		
 *		NOTE: When passing parameters, make sure there is a "\" at the end of the directory path.
 * 		7/22/2014 MGE:  This is an update to OnCoreMacros.sas and should be used when processing the data exports 
@@ -657,7 +660,8 @@ MACRO #5: InsertID
 		Author:  MGE
 		Date created:  July 2014
 		Updates:
-			July 2015 - Modified code to catch case where SEQUENCE_NO_ does not contain a hyphen. ANK
+			July 2015 - Modified code to catch case where SEQUENCE_NO_ does not contain a hyphen - ANK
+			July 2016 - Added the case where SEQUENCE_NO_ contains 2 hyphens (site ID included in sequence) - ANK
 **********************************************/
 %macro InsertID(StudyNum); 
 
@@ -667,22 +671,36 @@ MACRO #5: InsertID
 			set &DatasetToAlter.;
 
 			* Create USUBJID and SUBJID variables and set the length;
-			format SUBJID 3. USUBJID $8.;
-				
-			if find(SEQUENCE_NO_,'-')>0 then do; *SEQUENCE_NO_ contains a hyphen in it;
-				SUBJID = substr(SEQUENCE_NO_,indexc(SEQUENCE_NO_,'-')+1,length(SEQUENCE_NO_)-indexc(SEQUENCE_NO_,'-'));
-				USUBJID = &StudyNum. || substr(SEQUENCE_NO_,indexc(SEQUENCE_NO_,'-'),length(SEQUENCE_NO_)-indexc(SEQUENCE_NO_,'-')+1);
+			format SUBJID 8. USUBJID $12.;
+			
+			* Case 1: SEQUENCE_NO_ contains a single hyphen in it (most cases), should be in the form [STUDYID]-[SUBJID];
+			* In this case, SUBJID = [SUBJID] and USUBJID = [STUDYID]-[SUBJID];
+			if count(SEQUENCE_NO_,'-') = 1 then do; 
+				SUBJID = substr(SEQUENCE_NO_,find(SEQUENCE_NO_,'-')+1,length(SEQUENCE_NO_)-find(SEQUENCE_NO_,'-'));
 				if &StudyNum. = '0498' then do;
-					*0498 has 4-digit IDs in SEQUENCE_NO_;				
+					*0498 has a mix of 3-digit and 4-digit IDs in SEQUENCE_NO_;
 					if SUBJID < 10 then USUBJID = &StudyNum. || '-00' || strip(put(SUBJID, 3.));
 					else if SUBJID < 100 then USUBJID = &StudyNum. || '-0' || strip(put(SUBJID, 3.));
 					else USUBJID = &StudyNum. || '-' || strip(put(SUBJID, 3.));
 				end;
+				else do;
+					USUBJID = &StudyNum. || '-' || substr(SEQUENCE_NO_,find(SEQUENCE_NO_,'-')+1,length(SEQUENCE_NO_)-find(SEQUENCE_NO_,'-')+1);
+				end;
 			end;
-			else do; *SEQUENCE_NO_ does not contain a hyphen in it;
+			* Case 2: SEQUENCE_NO_ does not contain a hyphen in it, should be in the form [SUBJID].
+			* In this case, SUBJID = [SUBJID] and USUBJID = [STUDYID]-[SUBJID];
+			else if count(SEQUENCE_NO_,'-') = 0 then do; 
 				SUBJID = SEQUENCE_NO_;
 				USUBJID = &StudyNum. || '-' || strip(SEQUENCE_NO_);
 			end;
+			* Case 3: SEQUENCE_NO_ contains TWO hyphens in it -- typically in the form [SITEID]-[STUDYID]-[SUBJID];
+			* In this case, SUBJID = [SITEID][SUBJID] and USUBJID = [STUDYID]-[SITEID]-[SUBJID];
+			else if count(SEQUENCE_NO_,'-') = 2 then do; 
+				SUBJID = substr(SEQUENCE_NO_,1,2) || substr(SEQUENCE_NO_,find(SEQUENCE_NO_,'-',-1*length(SEQUENCE_NO_))+1);
+				*USUBJID will be [STUDYID]-[SITEID]-[SUBJID];
+				USUBJID = &StudyNum. || '-' || substr(SEQUENCE_NO_,1,2) || '-' || substr(SEQUENCE_NO_,find(SEQUENCE_NO_,'-',-1*length(SEQUENCE_NO_))+1);
+			end;
+
 
 			* Drop some unnecessary variables here;
 			drop SEQUENCE_NO_ INITIALS; 
@@ -823,10 +841,15 @@ MACRO #7: InsertStudyID
 %macro InsertStudyID(StudyNum); 
 	%macro add_sid(DatasetToAlter);
 		data &DatasetToAlter.; 
+			retain STUDYID;
 			set &DatasetToAlter.;
 
-			STUDYID = 'IUCRO-' || &StudyNum.;
+			format STUDYNUM_NUMERIC 8.;
+			STUDYNUM_NUMERIC = &StudyNum.;
+			if STUDYNUM_NUMERIC < 525 then STUDYID = 'IUCRO-' || &StudyNum.;
+			else STUDYID = 'IUSCC-' || &StudyNum.;
 			label STUDYID = 'Study Protocol Number';
+			drop STUDYNUM_NUMERIC;
 		run;
 	%mend; 
 
@@ -1151,3 +1174,176 @@ MACRO #12: RemoveLabelColons
 
 %mend;
 ***************END OF MACRO #12;
+
+
+
+
+/********************************************
+MACRO #13: ArchiveSASDatasets
+		Description:  
+				Moves all SAS datasets in one folder to another folder, grouped into a subfolder with
+				the name YYYY-MM-DD, which represents the "creation date" of the dataset
+		Parameters: 
+				FolderWithDatasets = the folder containing the datasets to move
+				ArchiveFolder = the folder in which to create the YYYY-MM-DD folder containing the moved
+					datasets
+ 		Example:
+				%ArchiveSASDatasets(I:\Projects\Cancer\IUSCC\IUCRO-0473\Stat\,
+					I:\Projects\Cancer\IUSCC\IUCRO-0473\Stat\Archive\);
+				(Would the SAS dataset files in the STAT folder into a new folder named 2016-06-19, which
+				can be found in the STAT/ARCHIVE folder)
+
+		Author:  Anna Kispert
+		Date created:  June 2016
+**********************************************/
+%macro ArchiveSASDatasets(FolderWithDatasets,ArchiveFolder);
+
+	* Get the list of files and folders that are in the FolderWithDatasets;	
+	%GetFilenamesFromDir(&FolderWithDatasets.,directory_content);
+
+	* Reduce the list of files and folders to only include SAS dataset files;
+	data directory_content2;
+		set directory_content;
+
+		* Keep only the SAS dataset files;		
+		if find(filename,'.') then fileextension = strip(lowcase(substr(filename,find(filename,'.'))));
+		if fileextension = '.sas7bdat';
+
+		fullfilepath = strip(directory) || '\' || strip(filename); 
+	run;
+
+	*Only if there is at least one SAS dataset in the FolderWithDatasets should the archive be performed;
+	proc sql noprint; select count(*) into : NumDatasets from directory_content2; quit;
+	%if &NumDatasets > 0 %then %do;
+
+		* Get the full file path of the first dataset file and place it into a macro variable;
+		data first_dataset; set directory_content2; if _N_ = 1; run;	
+		proc sql noprint; select fullfilepath into : FirstDatasetFilename from first_dataset; quit;
+
+		* This dataset uses the INFILE command to "open" the first dataset and extract its metadata;
+		filename fileref "&FirstDatasetFilename.";
+		data dataset_information;
+			infile fileref truncover;
+			fid = fopen('fileref'); *This will return 1 if the file can be successfully accessed;                                                               
+			creation_datetime_txt = finfo(fid,'Create Time');
+			input var1 $1.; *Dummy variable for reading in datalines;
+		run;
+
+		* Set the archived folder name (i.e. the folder that will hold/group all of the datasets together to the string 
+		  'YYYY-MM-DD', using the creation date of the first file. Put this folder name into a new macro variable;
+		data dataset_information2 (keep = archived_folder_name);
+			set dataset_information (keep = creation_datetime_txt);
+
+			creation_date_txt = substr(creation_datetime_txt,1,find(creation_datetime_txt,':')-1);
+			creation_date = input(strip(creation_date_txt),date9.);
+			format creation_date yymmddd10.;
+			archived_folder_name = vvalue(creation_date);
+		run;
+		proc sql noprint; select archived_folder_name into : NewArchiveSubfolder from dataset_information2; quit;
+		
+		libname dsdir "&FolderWithDatasets."; *Library to move files from;
+
+		options dlcreatedir; *Turning on this option will force SAS to create a folder for a library if one does not exist;
+		libname archdir "&ArchiveFolder.&NewArchiveSubfolder."; *Create the new archive folder to move files to;
+		options nodlcreatedir; *Turn the dlcreatedir option off;
+
+		* Move the dataset files from one directory to another;
+		proc copy in = dsdir out = archdir move; run; 
+
+		* Clear the librefs now that they are no longer needed;
+		libname dsdir clear; libname archdir clear;
+		
+		* Delete all temp datasets created above (within the IF);
+		proc datasets memtype = data lib = work nolist;
+			delete first_dataset dataset_information dataset_information2;
+		quit;
+
+	%end;
+
+	* Delete all temp datasets created above (outside the IF);
+	proc datasets memtype = data lib = work nolist;
+		delete directory_content directory_content2;
+	quit;
+
+%mend;
+
+
+
+
+/********************************************
+MACRO #14: FixTimeImport
+		Description:  
+				Fix any input statement that informats time values as TIME5 (will not read integers as times)
+		Parameters: 
+				OnCoreSASFileDirectory = Directory where all the OnCore .sas files are stored
+ 		Example:
+				%FixTimeImport(I:\Projects\PsychBeta\DataMgt\RawData\);
+
+		Author:  ANK
+		Date created:  December 2016
+		Updates:
+**********************************************/
+%macro FixTimeImport(OnCoreSASFileDirectory);
+
+	* Temporary sub-macro to fix the follow-up SAS file, which has been exporting from OnCore with incorrect formatting;
+	%macro CheckForTimeInformat(FileName); 
+
+		%macro FixTimeImportOneFile(NameOfFile);
+			* Modify any informatting lines with the "time5" informat;
+			data SASFileCode2;
+				set SASFileCode;
+
+				if find(codeline,"informat","i") and find(codeline,"time5.;") then do;
+					codeline = tranwrd(codeline,"time5.;","hhmmss5.;");
+				end;
+			run;
+
+			* Overwrite the SAS program with the corrected text from the SASFileCode2 dataset;
+			data _null_;
+			    set SASFileCode2; 
+			    file "&OnCoreSASFileDirectory.&NameOfFile."; 
+			    put codeline; 
+			run;
+
+			* Delete the temporarily created SASFileCode2 dataset;
+			proc datasets memtype = data lib = work nolist; delete SASFileCode2; quit; run;
+
+		%mend FixTimeImportOneFile;
+	
+		* Read in the SAS file, storing each line in the file as an observation for the variable "formatline";
+		data SASFileCode;
+			length codeline $1000.;
+			infile "&OnCoreSASFileDirectory.&FileName.";
+			input;
+			codeline = _infile_;
+		run;
+
+		* Check to see if the file contains any lines containing "informat" and "time5.";
+		data _null_;
+			set SASFileCode;
+
+			nameoffile = "&FileName.";
+			retain indicator;
+			if _N_ = 1 then indicator = 0;
+
+			if indicator = 0 and find(codeline,"informat","i") and find(codeline,"time5.;") then do;
+				indicator = 1;
+				call execute ('%FixTimeImportOneFile(' || trim(nameoffile) || ');');
+			end;
+		run;
+
+		* Delete the temporarily created dataset;
+		proc datasets memtype = data lib = work nolist; delete SASFileCode; quit; run;
+
+	%mend CheckForTimeInformat;
+
+	%GetFilenamesFromDir(&OnCoreSASFileDirectory,SASFileDirectory);
+	data _null_;
+		set SASFileDirectory (where = (find(lowcase(filename),'.sas')));
+		call execute ('%CheckForTimeInformat(' || trim(filename) || ');');
+	run;
+
+	* Delete the temporarily created dataset;
+	proc datasets memtype = data lib = work nolist; delete SASFileDirectory; quit; run;
+
+%mend;
